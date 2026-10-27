@@ -5,3 +5,6 @@ __pycache__/
 *.pyd
 venv/
 node_modules
+storage/
+processed/
+checkpoints/
