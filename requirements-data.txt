@@ -1,0 +1,4 @@
+faster-whisper>=1.0.0
+tgt>=1.4.4
+g2p-en>=2.1.0
+tqdm>=4.66.0
