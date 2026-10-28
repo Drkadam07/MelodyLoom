@@ -21,6 +21,26 @@ tokenizer = REMITokenizer(vocab_cfg)
 model_cfg = ModelConfig(music_vocab_size=tokenizer.vocab_size)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = Vocal2MusicTransformer(model_cfg).to(device)
+
+# --- LOAD TRAINED WEIGHTS FROM CHECKPOINT ---
+ckpt_path = Path("checkpoints/best_model.pt")
+if ckpt_path.exists():
+    try:
+        state_dict = torch.load(ckpt_path, map_location=device)
+        # Handle both raw state_dicts and full checkpoint training dictionaries
+        if "model_state_dict" in state_dict:
+            state_dict = state_dict["model_state_dict"]
+        model.load_state_dict(state_dict)
+        print(f"✅ Successfully loaded trained weights from {ckpt_path}")
+    except Exception as e:
+        print(
+            f"⚠️ Failed to load checkpoint weights: {e}. Running with uninitialized weights."
+        )
+else:
+    print(
+        f"⚠️ Warning: Checkpoint not found at {ckpt_path}. Running with uninitialized weights."
+    )
+
 model.eval()
 
 preprocessor = VocalPreprocessor(AudioConfig())
