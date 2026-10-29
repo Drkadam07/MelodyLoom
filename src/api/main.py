@@ -1,10 +1,12 @@
+import re
 import uuid
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 import torch
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from typing import Dict, List, Optional, Tuple
 
 from src.audio.preprocess import VocalPreprocessor
 from src.config import AudioConfig, ModelConfig, VocabConfig
@@ -12,7 +14,7 @@ from src.generation.mix import DSPMixerAndRenderer
 from src.models.vocal2music_transformer import Vocal2MusicTransformer
 from src.music.tokenizer import REMITokenizer
 
-app = FastAPI(title="Vocal2Music Multimodal Generation API", version="1.0.0")
+app = FastAPI(title="Vocal2Music Suno-Powered API", version="2.0.0")
 
 # Initialize singletons
 vocab_cfg = VocabConfig()
@@ -22,24 +24,16 @@ model_cfg = ModelConfig(music_vocab_size=tokenizer.vocab_size)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = Vocal2MusicTransformer(model_cfg).to(device)
 
-# --- LOAD TRAINED WEIGHTS FROM CHECKPOINT ---
+# --- LOAD TRAINED WEIGHTS ---
 ckpt_path = Path("checkpoints/best_model.pt")
 if ckpt_path.exists():
-    try:
-        state_dict = torch.load(ckpt_path, map_location=device)
-        # Handle both raw state_dicts and full checkpoint training dictionaries
-        if "model_state_dict" in state_dict:
-            state_dict = state_dict["model_state_dict"]
-        model.load_state_dict(state_dict)
-        print(f"✅ Successfully loaded trained weights from {ckpt_path}")
-    except Exception as e:
-        print(
-            f"⚠️ Failed to load checkpoint weights: {e}. Running with uninitialized weights."
-        )
+    state_dict = torch.load(ckpt_path, map_location=device)
+    if "model_state_dict" in state_dict:
+        state_dict = state_dict["model_state_dict"]
+    model.load_state_dict(state_dict)
+    print(f"✅ Loaded trained weights from {ckpt_path}")
 else:
-    print(
-        f"⚠️ Warning: Checkpoint not found at {ckpt_path}. Running with uninitialized weights."
-    )
+    print("⚠️ Warning: Checkpoint not found. Running with uninitialized weights.")
 
 model.eval()
 
@@ -58,11 +52,59 @@ class JobResponse(BaseModel):
     error: Optional[str] = None
 
 
+def parse_structural_lyrics(raw_text: str) -> List[str]:
+    """Parses Suno-style tags like [Verse], [Chorus] and returns structured sections/tokens."""
+    sections = re.split(r"(\[.*?\])", raw_text)
+    tokens = []
+    for sec in sections:
+        sec = sec.strip()
+        if not sec:
+            continue
+        if sec.startswith("[") and sec.endswith("]"):
+            tag_name = sec[1:-1].upper()
+            tokens.append(f"SECTION_{tag_name}")
+        else:
+            # Tokenize words/lines
+            tokens.extend(sec.split())
+    return tokens if tokens else ["SECTION_VERSE", "Vocals"]
+
+
+def style_prompt_to_embeddings(style_prompt: str) -> Tuple[int, int]:
+    """Maps free-text style prompts to genre/mood indices via keyword analysis."""
+    prompt_lower = style_prompt.lower()
+
+    # Genre mapping
+    if "rock" in prompt_lower:
+        genre_idx = 1
+    elif "lofi" in prompt_lower or "lo-fi" in prompt_lower:
+        genre_idx = 2
+    elif "edm" in prompt_lower or "dance" in prompt_lower:
+        genre_idx = 3
+    elif "ballad" in prompt_lower or "acoustic" in prompt_lower:
+        genre_idx = 4
+    else:
+        genre_idx = 0  # Default POP
+
+    # Mood mapping
+    if "happy" in prompt_lower or "uplifting" in prompt_lower:
+        mood_idx = 1
+    elif "sad" in prompt_lower or "depressing" in prompt_lower:
+        mood_idx = 2
+    elif "energetic" in prompt_lower or "hype" in prompt_lower:
+        mood_idx = 3
+    elif "calm" in prompt_lower or "relax" in prompt_lower:
+        mood_idx = 4
+    else:
+        mood_idx = 0  # Default MELANCHOLIC
+
+    return genre_idx, mood_idx
+
+
 def _run_generation_pipeline(
     job_id: str,
     input_wav_path: Path,
-    genre: str,
-    mood: str,
+    style_prompt: str,
+    structural_lyrics: str,
     key: str,
     bpm: float,
 ) -> None:
@@ -74,7 +116,18 @@ def _run_generation_pipeline(
         melody_notes = preprocessor.extract_melody_notes(y_24k, bpm=bpm)
         duration_sec = len(y_44k) / 44100.0
 
-        # 2. Construct Conditioning Tensors
+        # 2. Parse Style Prompt & Structural Lyrics
+        genre_idx, mood_idx = style_prompt_to_embeddings(style_prompt)
+        parsed_tokens = parse_structural_lyrics(structural_lyrics)
+
+        # Simple token hashing to ID for embedding lookup
+        lyric_ids = [
+            abs(hash(t)) % (model_cfg.lyrics_vocab_size - 1) + 1 for t in parsed_tokens
+        ]
+        lyric_ids = lyric_ids[: model_cfg.max_lyrics_len]
+        if len(lyric_ids) < model_cfg.max_lyrics_len:
+            lyric_ids.extend([0] * (model_cfg.max_lyrics_len - len(lyric_ids)))
+
         pitches = [
             min(127, max(0, n.midi)) for n in melody_notes[: model_cfg.max_melody_len]
         ] or [60]
@@ -85,12 +138,8 @@ def _run_generation_pipeline(
 
         melody_pitches = torch.tensor([pitches], dtype=torch.long, device=device)
         melody_durations = torch.tensor([durs], dtype=torch.long, device=device)
-        lyric_tokens = torch.ones(
-            (1, 16), dtype=torch.long, device=device
-        )  # Placeholder for ASR tokens
+        lyric_tokens = torch.tensor([lyric_ids], dtype=torch.long, device=device)
 
-        genre_idx = vocab_cfg.genres.index(genre) if genre in vocab_cfg.genres else 0
-        mood_idx = vocab_cfg.moods.index(mood) if mood in vocab_cfg.moods else 0
         key_idx = vocab_cfg.keys.index(key) if key in vocab_cfg.keys else 0
 
         # 3. Multimodal Transformer Generation
@@ -131,8 +180,10 @@ def _run_generation_pipeline(
 async def create_generation_job(
     background_tasks: BackgroundTasks,
     audio: UploadFile = File(...),
-    genre: str = Form("POP"),
-    mood: str = Form("MELANCHOLIC"),
+    style_prompt: str = Form("90s Synth-Pop, driving bass, melancholic mood"),
+    structural_lyrics: str = Form(
+        "[Verse]\nI walk alone beneath the city lights...\n\n[Chorus]\nAnd the city shines bright..."
+    ),
     key: str = Form("C"),
     bpm: float = Form(96.0),
 ):
@@ -153,8 +204,8 @@ async def create_generation_job(
         _run_generation_pipeline,
         job_id,
         input_wav_path,
-        genre.upper(),
-        mood.upper(),
+        style_prompt,
+        structural_lyrics,
         key.upper(),
         bpm,
     )
