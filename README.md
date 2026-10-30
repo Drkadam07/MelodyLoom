@@ -1,6 +1,6 @@
-# 🎵 Vocal2Music: Multimodal Deep Learning for Automatic Musical Accompaniment Generation
+# 🎵 MelodyLoom: Multimodal Deep Learning for Automatic Musical Accompaniment Generation
 
-Vocal2Music is an end-to-end generative AI project that transforms raw human vocal recordings into complete musical arrangements. Given a vocal recording containing lyrics and melody, the system aims to generate synchronized instrumental accompaniment, including drums, bass, chords, and melodic layers, followed by audio rendering, mixing, and mastering.
+MelodyLoom is an end-to-end generative AI project that transforms raw human vocal recordings into complete musical arrangements. Given a vocal recording containing lyrics and melody, the system aims to generate synchronized instrumental accompaniment, including drums, bass, chords, and melodic layers, followed by audio rendering, mixing, and mastering.
 
 The system combines pretrained audio and speech-processing components with a custom Multimodal Cross-Attention Transformer that learns to coordinate lyrics, vocal melody, and musical structure.
 
